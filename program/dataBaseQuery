@@ -1,0 +1,73 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Oct 11 14:06:30 2017
+
+@author: alfred
+
+Oracle 数据库操作
+"""
+
+# 载入模块
+import pandas as pd
+import cx_Oracle
+import sqlite3
+
+# 定义数据库运行类 
+class DataBaseRun:
+    def __init__(self,db):
+        dsn=cx_Oracle.makedsn('10.8.0.164','1521','quan')
+        usr=''
+        pwd=''
+        
+        if db == 'factor': #sqlite3 格式的因子测试临时库
+            self.__connection= sqlite3.connect("factortest.db")    
+        else :
+            if db == 'qa':
+                usr='qa2'
+                pwd='qa2'
+            elif db =='wind' :
+                usr='wind'
+                pwd='wind'      
+            self.__connection=cx_Oracle.connect(usr,pwd,dsn)             
+        
+    def __del__(self):  
+        self.__connection.commit()
+        self.__connection.close()
+    
+    def get_connection(self):
+        return self.__connection
+    
+    '''根据sql来返回一个 DataFrame'''  
+    def exec_sql_byResult(self,sql,index=[]):
+        try:
+            __df_result = pd.read_sql(sql, con=self.__connection)
+            __df_result.columns = map(str.lower, __df_result.columns)  
+            if len(index)>0:
+                __df_result.set_index(index, inplace=True)
+            return __df_result
+        except Exception as e:            
+            raise e
+
+    '''根据sql来返回一个Vector'''
+    def exec_sql_bysingle(self,sql):
+        try:        
+            __cursor = self.__connection.cursor()
+            __r= __cursor.execute(sql)
+            __result = __r.fetchall()
+            __lst = []
+            for i in __result:
+                __lst.append(i[0])
+            return __lst        
+        except Exception as e:
+            raise e       
+            
+    '''执行一个SQL，不返回结果'''
+    def exec_sql(self,sql):
+        try:        
+            __cursor = self.__connection.cursor()
+            __cursor.execute(sql)
+            self.__connection.commit()
+        except Exception as e:
+            raise e               
+            
+            
