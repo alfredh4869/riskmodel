@@ -1,0 +1,234 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Oct 17 10:57:58 2017
+
+@author: intern
+
+利用sklearn计算risk-model
+"""
+
+# 载入模块
+from dataBaseQuery import DataBaseRun
+import h5py
+from datetime import datetime
+import time
+import numpy as np
+import pandas as pd
+import math
+import lsqlin
+from sklearn import linear_model
+
+#import scipy.optimize as sco
+#import scipy.interpolate as sci
+
+class Risk_Model():
+    
+    def __init__(self,database):
+        '''
+        定义初始变量
+        输出参数：
+        -------
+        database：str
+            需要连接的数据库，'qa'或者'wind'
+        '''
+        self.db = DataBaseRun(database)
+        self.fileName = 'risk_model_daily.h5'
+        self.file = h5py.File(self.fileName, 'a')          # 创建hdf5文件
+        self.tradedate = []                                # 交易日期
+        self.sector_weight = pd.Series()                 # 各行业权重    
+        
+        self.style_factor_list = ['resvol','size','beta','momentum','nls','bp','earning','growth','leverage','liquidity']        
+        self.sector_factor_list = self.db.exec_sql_bysingle('select industryname industry from qwindustrystruct where levelnum=1') #行业
+        self.factor_list = self.style_factor_list + self.sector_factor_list
+        
+        self.temp_rmdf = pd.DataFrame()                   # 用于临时储存的DataFrame
+        
+        
+    def getFactorPeriod(self, start = '20100104'):
+        '''
+        选取风险模型回测日期
+        输出参数：
+        --------
+        start: str
+            初始日期，格式 '%Y%m%d'
+       '''                  
+        sql = '''
+            select distinct tradedate from factordatap 
+                where tradedate >= #startdate# 
+                order by tradedate
+            '''
+        sql = sql.replace("#startdate#",start)
+        t_date = self.db.exec_sql_bysingle(sql)
+        t_date = [str(x) for x in t_date]
+        
+        # 匹配内部变量
+        self.tradedate = t_date
+        return t_date
+    
+        
+    def getCurrentDate(self):
+        '''
+        获取当天交易日
+        '''
+        return time.strftime('%Y%m%d',time.localtime(time.time()))
+    
+    
+    def fetch_historical_risk_model_daily(self,tradedate):
+        '''
+        读取风险模型每日数值
+        '''
+        for t in self.tradedate:            
+            sql = '''           
+                select a.tradedate,a.secucode,1 market,indname1 industry,weight3 regresswgt,weight4 mktwgt,a.pricechange ret,
+                "100099" resvol, "100101" as "SIZE", "100103" beta, "100105" momentum, "100107" NLS,
+                "100108" bp, "100115" earning, "100116" growth, "100117" leverage, "100118" liquidity
+                from rmestu a,factordatap b
+                where a.tradedate = b.tradedate and a.secucode=b.secucode
+                and a.tradedate = %s
+                order by a.tradedate,a.secucode    
+                 '''%(str(tradedate))
+            df = self.db.exec_sql_byResult(sql,['tradedate','secucode'])
+            
+            # 缺失值用0填充
+            df.fillna(0,inplace=True)
+
+            expo_market = df[['market']]
+            expo_industry = pd.get_dummies(df['industry'])[self.sector_factor_list]
+            expo_style = df[self.style_factor_list]
+            wgt_schema = df[['regresswgt','mktwgt']]
+            ret_list = df[['ret']]
+            del df
+            
+            # 重构数据中心点（样本空间不同造成的）
+            for sty in self.style_factor_list:
+                mean = np.sum(wgt_schema['mktwgt'] * expo_style[sty])
+                std = np.nanstd(expo_style[sty])
+                expo_style[sty] = (expo_style[sty] - mean)/std
+
+            df = pd.concat([expo_market,expo_industry,expo_style])
+            df.to_hdf(self.fileName,'risk_model_'+t, mode = 'a')
+
+            return expo_market,expo_industry,expo_style,wgt_schema,ret_list
+                    
+        
+    def check_risk_model_avaliability(self,
+                                      datetime=None):
+        '''
+        检查风险模型是否存在(默认检查最新的时间)
+        输入参数：
+        --------
+        datetime: str
+            如果不输入默认为None,则提取系统当前日期
+        
+        输出参数：
+        --------
+        True/False: bool
+            如果数据已经存在HDF5数据表中，则返回True，反之则为False
+        '''
+        if datetime is None:
+            datetime = self.getCurrentDate()
+                
+        try:
+            # 检测数据是否存在
+            _check = pd.read_hdf(self.fileName, key = 'risk_model_' + datetime, mode = 'r')
+            del _check
+            return True            
+        except:
+            print('risk_model_' + datetime + ' does not exist')
+            return False
+        
+        
+    def calc_risk_model_daily(self, datetime = None):
+        '''
+        读取特定日期风险数据并储存
+        输入参数：
+        --------
+        datetime: str
+            如果不输入默认为None,则提取系统当前日期
+        '''
+        # 如果datetime没有输入，则选取当天最新日期
+        if datetime is None:
+            datetime = self.getFactorPeriod()
+            
+        for t in datetime:
+            (expo_market,expo_industry,expo_style,wgt_schema,ret_list) = self.fetch_historical_risk_model_daily(t)
+            
+            # 行业加权收益为0的约束
+            industry_wgt = wgt_schema['mktwgt'].T.dot(expo_industry)
+            regress_wgt = wgt_schema['regresswgt'].apply(lambda x: math.sqrt(x))
+            
+            for tag in ['MIS','MI','M']:
+                if tag == 'M':
+                    expo_all = expo_market.copy()
+                elif tag == 'MI':
+                    expo_all = pd.concat([expo_market.copy(),expo_industry.copy()],axis=1)
+                elif tag == 'MIS':
+                    expo_all = pd.concat([expo_market.copy(),
+                                          expo_industry.copy(),
+                                          expo_style.copy()],axis=1)
+            C = expo_all.as_matrix()*regress_wgt.values.reshape(len(regress_wgt),1)
+            d = ret_list.as_matrix()*regress_wgt.values.reshape(len(regress_wgt),1)
+            Aeq = pd.DataFrame(index=expo_all.columns)
+            Aeq['wgt'] = industry_wgt
+            Aeq.fillna(0,inplace=True)
+            Aeq = Aeq.as_matrix().T
+            beq = np.array([0])
+            if tag == 'M':
+                ret = lsqlin.lsqlin(C,d,0,None,None,None,None,None,None,None,None)
+                factor_ret = pd.DataFrame([lsqlin.cvxopt_to_numpy_matrix(ret['x'])],
+                                           index=expo_all.columns,
+                                           columns=['factorreturn'])
+            else:
+                ret=lsqlin.lsqlin(C,d,0,None,None,Aeq,beq,None,None,None,None)
+                factor_ret = pd.DataFrame(lsqlin.cvxopt_to_numpy_matrix(ret['x']),
+                                          index=expo_all.columns,
+                                          columns=['factorreturn'])
+            total_factor_contri = expo_all.dot(factor_ret)
+            specific_ret = ret_list['ret'] - total_factor_contri['factorreturn']
+            specific_ret.name = 'specificret'
+            
+            R2 = 1-((regress_wgt.T.dot(specific_ret.apply(lambda x:math.pow(x,2))))/
+            (regress_wgt.T.dot(ret_list['ret'].apply(lambda x:math.pow(x,2)))))
+            
+            factorreturn_temp = factor_ret.T.reset_index(drop=True)
+            factorreturn_temp['tradedate'] = t
+            factorreturn_temp['R2'] = R2
+            factorreturn_temp['scope'] = tag
+            factorexpo_temp = expo_all
+            factorexpo_temp['tradedate']=t
+            factorexpo_temp['specificreturn'] = specific_ret
+            factorexpo_temp['scope'] = tag
+            
+            factorreturn_temp.to_hdf(self.fileName,'factor_return_'+t,mode='a')
+            factorexpo_temp.to_hdf(self.fileName,'factor_expo_'+t,mode='a')
+            print('%s的数据已经处理完毕'%(str(t)))
+                    
+                    
+    
+    def read_risk_model(self,datetime = None):
+        '''
+        读取HDF5文件中的Key
+        输入参数：
+        --------
+        datetime: str
+            如果不输入默认为None,则提取系统当前日期
+        '''
+        if datetime is None:
+            datetime = self.getCurrentDate()
+            
+        df = pd.read_hdf(self.fileName,key = 'risk_model_'+datetime)
+        df1 = pd.read_hdf(self.fileName,key = 'factor_return_'+datetime)
+        return df,df1
+        
+
+    
+if __name__ == '__main__':
+    proj_start = datetime.now()
+    model = Risk_Model('qa')
+    rm_date = model.getFactorPeriod()
+    update = model.calc_risk_model_daily()
+    df, df1 = model.read_risk_model(rm_date[-1])
+    proj_end = datetime.now()
+    print('project costs ' + (proj_end - proj_start).seconds)
+    
+    
