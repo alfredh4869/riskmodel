@@ -1,0 +1,207 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Dec 11 14:10:57 2017
+
+@author: taoch
+
+##### Wind股票相关原始数据读取 #####
+"""
+# 载入模块
+import pandas as pd
+pd.set_option('expand_frame_repr',False)
+import numpy as np
+import datetime
+import time
+
+from WindPy import *
+w.start()
+
+import config
+
+class WindStkData(object):
+    
+    def __init__(self, start_date, end_date):
+        '''
+        设定内置变量
+        输入参数
+        -------
+        start_date: int
+            开始日期, 格式'YYYYMMDD' 
+        end_date: int
+            截止日期, 格式'YYYYMMDD'
+        '''
+        self.start = str(start_date)                         # 开始时间
+        self.end = str(end_date)                             # 结束时间
+        
+        self.hist_tradeDays = pd.Series()               # 历史交易日
+        self.sh_ashare_list = pd.Series()               # 上交所股票代码
+        self.sz_ashare_list = pd.Series()               # 深交所股票代码
+        self.all_ashare_list = pd.Series()              # 所有股票代码
+        
+                                        
+    def getCurrentTime(self):
+        '''
+        获取当前时间
+        '''
+        t = time.strftime('%Y-%m-%d',time.localtime(time.time()))
+        return pd.Series(pd.to_datetime(t))
+        
+        
+    def getHistoricalDate(self):
+        '''
+        获取历史回测交易日
+        '''
+        # 从Wind读取交易日数据，取头不取尾
+        _tday = w.tdays(self.start, self.end)
+        _tradingDay_hist = pd.Series(_tday.Data[0])
+        
+        # 匹配内部变量
+        self.hist_tradeDays = _tradingDay_hist
+        
+        return _tradingDay_hist
+    
+    
+    def getSHStkList(self):
+        '''
+        获取所有以SH结尾的上交所股票代码
+        '''
+        # 获取回测历史时间
+        _td = self.getHistoricalDate()
+        
+        # 生成一个Series，行是时间，列是代码
+        _shStkList = pd.Series(index = _td, name='sh_stk_list')
+        
+        # 获取当天股票数据
+        for t in _td:
+            allShStk = w.wset("SectorConstituent",
+                              "date = " + date.strftime(t,'%Y%m%d') + ";sectorId = a001010200000000; field = wind_code")
+            if allShStk.ErrorCode != 0:
+                print('Get Data Failed on ' + date.strftime(t,'%Y%m%d'))
+                
+            _shStkList.ix[t] = allShStk.Data[0]
+        
+        # 匹配内部变量
+        self.sh_ashare_list = _shStkList
+        return _shStkList
+    
+    
+    def getSZStkList(self):
+        '''
+        获取所有以SZ结尾的深交所股票代码
+        '''
+        # 获取回测历史时间
+        _td = self.getHistoricalDate()
+        
+        # 生成一个Series,行是时间，列是代码
+        _szStkList = pd.Series(index = _td, name = 'sz_stk_list')
+        
+        # 获取当天股票数据
+        for t in _td:
+            allSzStk = w.wset("SectorConstituent",
+                              "date = " + date.strftime(t,'%Y%m%d') + ";sectorId=a001010300000000; field = wind_code")
+            if allSzStk.ErrorCode != 0:
+                print('Get Data Failed on ' + date.strftime(t,'%Y%m%d'))
+                
+            _szStkList.ix[t] = allSzStk.Data[0]
+        
+        # 匹配内部变量
+        self.sz_ashare_list = _szStkList
+        return _szStkList
+    
+
+    def getAllStkList(self):
+        '''
+        获取所有A股股票代码
+        '''
+        # 获取回测历史时间
+        _td = self.getHistoricalDate()
+        
+        # 生成一个Series, 行是时间，列是代码
+        _allStkList = pd.Series(index = _td, name = 'all_stk_list')
+        for t in _td:
+            allAStk = w.wset("SectorConstituent",
+                             "date = " + date.strftime(t,'%Y%m%d') + ";sectorId=a001010100000000; field = wind_code")
+            if allAStk.ErrorCode != 0:
+                print('Get Data Failed on ' + date.strftime(t,'%Y%m%d'))
+                
+            _allStkList.ix[t] = allAStk.Data[0]
+            
+        # 匹配内部变量
+        self.all_ashare_list = _allStkList        
+        return _allStkList
+    
+    
+    def getRawData(self):
+        '''
+        获取交易行情数据, 按照股票每只储存数据(字段参考WIND参考数据服务，代码RDF)
+        #stock=w.wsd(symbol,'trade_code,open,high,low,close,volume,amt',start_date,end_date)
+        '''    
+        # 获取全市场股票代码
+        _StkList = self.getAllStkList()
+
+        # 获取历史日期
+        _td = self.getHistoricalDate()
+        
+        _data = pd.DataFrame()
+        _codes = []
+        for t in _td:
+            for code in _StkList.ix[t]:
+                # 若股票数据已经读取完成则跳过，否则继续执行数据读取
+                if code in _codes:
+                    continue
+                else:
+                    _codes.append(code)
+                    stock = w.wsd(code,"trade_code,open,high,low,close,pre_close,volume,amt,dealnum,pct_chg,vwap,\
+                    adjfactor,turn,free_turn,maxupordown,lastradeday_s,last_trade_day,pe_ttm,val_pe_deducted_ttm,pe_lyr,pb_lf,\
+                    ps_ttm,ps_lyr,dividendyield2,ev,mkt_cap_ard,pb_mrq,pcf_ocf_ttm,pcf_ncf_ttm,pcf_ocflyr,pcf_nflyr,\
+                    trade_status",self.start,self.end)
+                    _data['TradingDate']=pd.to_datetime(stock.Times)
+                    _data['SecuCode']=stock.Codes*len(_data['TradingDate'])    # 股票代码
+                    _data['open']=stock.Data[1]                                # 开盘价
+                    _data['high']=stock.Data[2]                                # 最高价
+                    _data['low']=stock.Data[3]                                 # 最低价
+                    _data['close']=stock.Data[4]                               # 收盘价
+                    _data['pre_close']=stock.Data[5]                           # 前收盘价
+                    _data['volume']=stock.Data[6]                              # 成交量
+                    _data['amt']=stock.Data[7]                                 # 成交额
+                    _data['dealnum']=stock.Data[8]                             # 成交笔数
+                    _data['pct_chg']=stock.Data[9]                             # 涨跌幅
+                    _data['vwap']=stock.Data[10]                               # 均价
+                    _data['adj_factor']=stock.Data[11]                         # 复权因子
+                    _data['turn']=stock.Data[12]                               # 换手率
+                    _data['free_turn']=stock.Data[13]                          # 换手率(基准 自由流通股本)
+                    _data['maxupordown'] = stock.Data[14]                      # 涨跌停状态
+                    _data['lastradeday_s']=stock.Data[15]                      # 最近交易日期
+                    _data['last_trade_day']=stock.Data[16]                     # 市场最近交易日
+                    _data['pe_ttm']=stock.Data[17]                             # 市盈率(TTM)
+                    _data['val_pe_deducted_ttm']=stock.Data[18]                # 市盈率PE（TTM,扣除非经常性亏损）
+                    _data['pe_lyr']=stock.Data[19]                             # 市盈率PE（LFY）
+                    _data['pb_lf']=stock.Data[20]                              # 市净率（LF）
+                    _data['ps_ttm']=stock.Data[21]                             # 市销率（TTM）
+                    _data['ps_lyr']=stock.Data[22]                             # 市销率（LYR）
+                    _data['dividendyield2']=stock.Data[23]                     # 股息率（近12个月）
+                    _data['ev']=stock.Data[24]                                 # 总市值1
+                    _data['mkt_cap_ard']=stock.Data[25]                        # 总市值2
+                    _data['pb_mrq']=stock.Data[26]                             # 市净率PB（MRQ）
+                    _data['pcf_ocf_ttm']=stock.Data[27]                        # 市现率PCF（经营现金流TTM)
+                    _data['pcf_ncf_ttm']=stock.Data[28]                        # 市现率PCF（现金净流量TTM）
+                    _data['pcf_ocflyr']=stock.Data[29]                         # 市现率PCF（经营现金流LYR）
+                    _data['pcf_ncflyr']=stock.Data[30]                         # 市现率PCF（现金净流量LYR）
+                    _data['trade_status']=stock.Data[31]                       # 交易状态（1：交易，2：待核查，0：停牌）
+                    _data['data_source']='Wind'                                # 数据来源
+                    #_data['updated_date']=time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
+                    _data.set_index(['TradingDate','SecuCode'],drop=True)
+                    _data.to_csv(config.input_data_path + '/stock_data/' + stock.Codes[0] + '.csv',
+                                 encoding='GBK')
+                    
+                
+if __name__ == '__main__':
+    getData = WindStkData(20171204,20171208)
+    hist_data = getData.getHistoricalDate()    
+#    sh = getData.getSHStkList()
+#    sz = getData.getSZStkList()
+#    allA = getData.getAllStkList()
+    getData.getRawData()   
+    
+    
+
